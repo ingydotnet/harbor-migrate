@@ -1,0 +1,12 @@
+
+=== Migration Report ===
+Errors: 1 Warnings: 2 Info: 1
+[ERROR] database.type: Internal database is not supported.
+  Action: Deploy external PostgreSQL
+[WARNING] expose.tls.certSource: certSource='auto' is not supported.
+  Action: Configure tls.certManager
+[WARNING] trivy: Trivy is now a subchart.
+  Action: Configure under trivy.*
+[INFO] redis.type: Internal Redis migrated to Valkey subchart
+  Action: Review valkey.* settings
+!!! Migration has ERRORS that require manual intervention !!!

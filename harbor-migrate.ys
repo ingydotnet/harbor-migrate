@@ -1,0 +1,199 @@
+#!/usr/bin/env ys-0
+
+# Harbor Helm Migration Tool - YAMLScript Implementation
+# Usage: ys harbor-migrate.ys <input-values.yaml> [output-values.yaml]
+
+warnings =: atom(vector())
+
+defn get-or(m keys default):
+  val =: get-in(m keys)
+  if val: val default
+
+defn add-warn(level path msg action):
+  swap! warnings conj (hash-map "level" level "path" path "message" msg "action" action):
+
+defn map-direct-fields(legacy):
+  pull-policy =: get-or(legacy ["imagePullPolicy"] "IfNotPresent")
+  =>: hash-map().assoc("externalURL" (get legacy "externalURL")).assoc("harborAdminPassword" (get legacy "harborAdminPassword")).assoc("secretKey" (get legacy "secretKey")).assoc("logLevel" (get legacy "logLevel")).assoc("image" (hash-map "pullPolicy" pull-policy))
+
+defn map-ingress(legacy):
+  expose-type =: get-or(legacy ["expose" "type"] "ingress")
+  host =: get-in(legacy ["expose" "ingress" "hosts" "core"])
+  tls-enabled =: get-in(legacy ["expose" "tls" "enabled"])
+  cert-source =: get-in(legacy ["expose" "tls" "certSource"])
+
+  when (expose-type != "ingress"):
+    add-warn "ERROR" "expose.type" (str "expose.type='" expose-type "' is not supported.") "Migrate to ingress":
+
+  when (and tls-enabled (cert-source == "auto")):
+    add-warn "WARNING" "expose.tls.certSource" "certSource='auto' is not supported." "Configure tls.certManager":
+
+  tls-config =: (if (and tls-enabled (cert-source == "secret")) [(hash-map "secretName" (get-in legacy ["expose" "tls" "secret" "secretName"]) "hosts" [host])] [])
+
+  =>: hash-map().assoc("enabled" true).assoc("className" (get-in legacy ["expose" "ingress" "className"])).assoc("annotations" (get-in legacy ["expose" "ingress" "annotations"])).assoc("hosts" [(hash-map "host" host "paths" [(hash-map "path" "/" "pathType" "Prefix")])]).assoc("tls" tls-config)
+
+defn map-storage(legacy):
+  storage-type =: get-or(legacy ["persistence" "imageChartStorage" "type"] "filesystem")
+
+  storage =:
+    cond:
+      (storage-type == "filesystem"):
+        hash-map("type" "filesystem" "filesystem" (hash-map "rootdirectory" (get-or legacy ["persistence" "imageChartStorage" "filesystem" "rootdirectory"] "/storage")))
+      (storage-type == "s3"):
+        hash-map("type" "s3" "s3" (get-in legacy ["persistence" "imageChartStorage" "s3"]))
+      else:
+        hash-map("type" storage-type)
+
+  pvc =: get-in(legacy ["persistence" "persistentVolumeClaim" "registry"])
+  pvc-size =: get-or(pvc ["size"] "50Gi")
+  access-mode =: get(pvc "accessMode")
+
+  persistence =: hash-map("enabled" (get-or legacy ["persistence" "enabled"] true) "size" pvc-size "storageClass" (get pvc "storageClass") "existingClaim" (get pvc "existingClaim") "accessModes" (if access-mode [access-mode] nil))
+
+  =>: hash-map("storage" storage "persistence" persistence)
+
+defn map-database(legacy):
+  db-type =: get-or(legacy ["database" "type"] "internal")
+
+  if (db-type == "internal"):
+    then:
+      add-warn "ERROR" "database.type" "Internal database is not supported." "Deploy external PostgreSQL":
+      =>: hash-map()
+    else:
+      ext =: get-in(legacy ["database" "external"])
+      port-str =: get-or(ext ["port"] "5432")
+      port =: or((parse-long port-str) 5432)
+      =>: hash-map("host" (get ext "host") "port" port "username" (get-or ext ["username"] "postgres") "password" (get ext "password") "database" (get-or ext ["coreDatabase"] "registry") "sslmode" (get-or ext ["sslmode"] "disable"))
+
+defn map-redis(legacy):
+  redis-type =: get-or(legacy ["redis" "type"] "internal")
+
+  if (redis-type == "internal"):
+    then:
+      add-warn "INFO" "redis.type" "Internal Redis migrated to Valkey subchart" "Review valkey.* settings":
+      =>: hash-map("valkey" (hash-map "enabled" true "architecture" "standalone" "auth" (hash-map "enabled" true)) "externalRedis" (hash-map))
+    else:
+      ext =: get-in(legacy ["redis" "external"])
+      addr =: get(ext "addr")
+      parts =: (if addr (str/split addr ":") [])
+      host =: first(parts)
+      port-str =: (if (> (count parts) 1) (second parts) "6379")
+      port =: or((parse-long port-str) 6379)
+      =>: hash-map("valkey" (hash-map "enabled" false) "externalRedis" (hash-map "host" host "port" port "password" (get ext "password")))
+
+defn map-image(img):
+  =>: hash-map("repository" (get img "repository") "tag" (get img "tag"))
+
+defn map-component-base(comp):
+  img =: get(comp "image")
+  =>: hash-map("image" (if img (map-image img) nil) "replicas" (get comp "replicas") "resources" (get comp "resources") "nodeSelector" (get comp "nodeSelector") "tolerations" (get comp "tolerations") "affinity" (get comp "affinity") "podAnnotations" (get comp "podAnnotations") "podLabels" (get comp "podLabels") "extraEnv" (get comp "extraEnvVars"))
+
+defn map-core(legacy):
+  core =: get(legacy "core")
+  base =: map-component-base(core)
+  secret =: (if (or (get core "secret") (get core "xsrfKey")) (hash-map "secret" (get core "secret") "csrf_key" (get core "xsrfKey")) nil)
+  config =: (if (get core "quotaUpdateProvider") (hash-map "quota" (hash-map "update_provider" (get core "quotaUpdateProvider"))) nil)
+  =>: merge(base (hash-map "secret" secret "config" config))
+
+defn map-portal(legacy):
+  =>: map-component-base((get legacy "portal"))
+
+defn map-registry(legacy):
+  reg =: get(legacy "registry")
+  registry-container =: get(reg "registry")
+  controller =: get(reg "controller")
+  extra-env =: concat((or (get registry-container "extraEnvVars") []) (or (get controller "extraEnvVars") []))
+  base =: hash-map("image" (if registry-container (map-image (get registry-container "image")) nil) "controller" (hash-map "image" (if controller (map-image (get controller "image")) nil)) "replicas" (get reg "replicas") "nodeSelector" (get reg "nodeSelector") "tolerations" (get reg "tolerations") "affinity" (get reg "affinity") "podAnnotations" (get reg "podAnnotations") "podLabels" (get reg "podLabels") "extraEnv" extra-env)
+  secret =: (if (get reg "secret") (hash-map "http_secret" (get reg "secret")) nil)
+  =>: merge(base (hash-map "secret" secret))
+
+defn map-jobservice(legacy):
+  js =: get(legacy "jobservice")
+  base =: map-component-base(js)
+  cfg0 =: hash-map()
+  cfg1 =: (if (get js "maxJobWorkers") (assoc cfg0 "max_job_workers" (get js "maxJobWorkers")) cfg0)
+  cfg2 =: (if (get js "jobLoggers") (assoc cfg1 "job_loggers" (str/join "," (get js "jobLoggers"))) cfg1)
+  secret =: (if (get js "secret") (hash-map "secret" (get js "secret")) nil)
+  =>: merge(base (hash-map "config" (if (empty? cfg2) nil cfg2) "secret" secret))
+
+defn map-exporter(legacy):
+  exp =: get(legacy "exporter")
+  base =: map-component-base(exp)
+  config =: (if (or (get exp "cacheDuration") (get exp "cacheCleanInterval")) (hash-map "cache_time" (get exp "cacheDuration") "cache_clean_interval" (get exp "cacheCleanInterval")) nil)
+  =>: merge(base (hash-map "enabled" true "config" config))
+
+defn map-trivy(legacy):
+  trivy =: get(legacy "trivy")
+  enabled =: get(trivy "enabled")
+  when enabled:
+    has-detailed =: or((get trivy "vulnType") (get trivy "severity") (get trivy "ignoreUnfixed"))
+    when has-detailed:
+      add-warn "WARNING" "trivy" "Trivy is now a subchart." "Configure under trivy.*":
+  =>: hash-map("enabled" enabled)
+
+defn map-metrics(legacy):
+  metrics =: get(legacy "metrics")
+  if (get metrics "enabled"):
+    then:
+      sm =: get(metrics "serviceMonitor")
+      =>: hash-map("serviceMonitor" (hash-map "enabled" (get sm "enabled") "labels" (get sm "additionalLabels") "interval" (get sm "interval")))
+    else:
+      =>: hash-map()
+
+defn check-unsupported(legacy):
+  notary =: get(legacy "notary")
+  when (and notary (get notary "enabled")):
+    add-warn "ERROR" "notary" "Notary is deprecated and not supported" "Migrate to Sigstore/cosign":
+
+  chartmuseum =: get(legacy "chartmuseum")
+  when (and chartmuseum (get chartmuseum "enabled")):
+    add-warn "ERROR" "chartmuseum" "ChartMuseum is deprecated" "Use OCI artifact support":
+
+  internal-tls =: get(legacy "internalTLS")
+  when (and internal-tls (get internal-tls "enabled")):
+    add-warn "WARNING" "internalTLS" "Internal TLS is not implemented" "Consider service mesh":
+
+defn print-warnings():
+  ws =: deref(warnings)
+  when-not (empty? ws):
+    level-order =: hash-map("ERROR" 0 "WARNING" 1 "INFO" 2)
+    sorted =: sort-by(\(get level-order (get %1 "level")) ws)
+    error-count =: count(filter(\((get %1 "level") == "ERROR") ws))
+    warning-count =: count(filter(\((get %1 "level") == "WARNING") ws))
+    info-count =: count(filter(\((get %1 "level") == "INFO") ws))
+    warn: "\n=== Migration Report ==="
+    warn: "Errors: $error-count Warnings: $warning-count Info: $info-count"
+    each w sorted:
+      lvl =: get(w "level")
+      pth =: get(w "path")
+      msg =: get(w "message")
+      act =: get(w "action")
+      warn: "[$lvl] $pth: $msg"
+      warn: "  Action: $act"
+    when (error-count > 0):
+      warn: "!!! Migration has ERRORS that require manual intervention !!!"
+
+defn remove-nils(m):
+  cond:
+    (map? m):
+      filtered =: filter(\(not (nil? (val %1))) m)
+      mapped =: map(\(vector (key %1) (remove-nils (val %1))) filtered)
+      =>: into(hash-map() mapped)
+    (sequential? m):
+      =>: mapv(remove-nils m)
+    else: m
+
+defn main(input-file output-file=""):
+  legacy =: yaml/load(slurp(input-file))
+  check-unsupported: legacy
+  storage-result =: map-storage(legacy)
+  redis-result =: map-redis(legacy)
+  result =: remove-nils(merge(map-direct-fields(legacy) hash-map("ingress" (map-ingress legacy)) hash-map("database" (map-database legacy)) redis-result hash-map("core" (map-core legacy)) hash-map("portal" (map-portal legacy)) hash-map("registry" (merge (map-registry legacy) storage-result)) hash-map("jobservice" (map-jobservice legacy)) hash-map("exporter" (map-exporter legacy)) hash-map("trivy" (map-trivy legacy)) hash-map("metrics" (map-metrics legacy))))
+  print-warnings:
+  output =: yaml/dump(result)
+  if (and output-file (not (empty? output-file))):
+    then:
+      spit output-file output:
+      warn: "\nMigrated values written to: $output-file"
+    else:
+      say: output

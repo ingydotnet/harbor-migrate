@@ -1,0 +1,118 @@
+harborAdminPassword: Harbor12345
+ingress:
+  enabled: true
+  className: ''
+  annotations:
+    ingress.kubernetes.io/ssl-redirect: 'true'
+    ingress.kubernetes.io/proxy-body-size: '0'
+    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+    nginx.ingress.kubernetes.io/proxy-body-size: '0'
+  hosts:
+  - host: core.harbor.domain
+    paths:
+    - path: /
+      pathType: Prefix
+  tls: []
+logLevel: info
+image:
+  pullPolicy: IfNotPresent
+exporter:
+  config:
+    cache_time: 23
+    cache_clean_interval: 14400
+  image:
+    repository: docker.io/goharbor/harbor-exporter
+    tag: dev
+  extraEnv: []
+  podLabels: {}
+  enabled: true
+  podAnnotations: {}
+  affinity: {}
+  nodeSelector: {}
+  replicas: 1
+  tolerations: []
+secretKey: not-a-secure-key
+registry:
+  image:
+    repository: docker.io/goharbor/registry-photon
+    tag: dev
+  extraEnv: []
+  podLabels: {}
+  storage:
+    filesystem:
+      rootdirectory: /storage
+    type: filesystem
+  podAnnotations: {}
+  affinity: {}
+  nodeSelector: {}
+  secret:
+    http_secret: ''
+  replicas: 1
+  tolerations: []
+  controller:
+    image:
+      repository: docker.io/goharbor/harbor-registryctl
+      tag: dev
+  persistence:
+    enabled: true
+    accessModes:
+    - ReadWriteOnce
+    storageClass: ''
+    size: 5Gi
+    existingClaim: ''
+database: {}
+externalRedis: {}
+portal:
+  image:
+    repository: docker.io/goharbor/harbor-portal
+    tag: dev
+  extraEnv: []
+  podLabels: {}
+  podAnnotations: {}
+  affinity: {}
+  nodeSelector: {}
+  replicas: 1
+  tolerations: []
+valkey:
+  architecture: standalone
+  auth:
+    enabled: true
+  enabled: true
+externalURL: https://core.harbor.domain
+metrics: {}
+trivy:
+  enabled: true
+jobservice:
+  config:
+    max_job_workers: 10
+    job_loggers: file
+  image:
+    repository: docker.io/goharbor/harbor-jobservice
+    tag: dev
+  extraEnv: []
+  podLabels: {}
+  podAnnotations: {}
+  affinity: {}
+  nodeSelector: {}
+  secret:
+    secret: ''
+  replicas: 1
+  tolerations: []
+core:
+  config:
+    quota:
+      update_provider: db
+  image:
+    repository: docker.io/goharbor/harbor-core
+    tag: dev
+  extraEnv: []
+  podLabels: {}
+  podAnnotations: {}
+  affinity: {}
+  nodeSelector: {}
+  secret:
+    csrf_key: ''
+    secret: ''
+  replicas: 1
+  tolerations: []
+
