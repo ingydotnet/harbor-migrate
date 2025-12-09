@@ -3,55 +3,121 @@
 # Harbor Helm Migration Tool - YAMLScript Implementation
 # Usage: ys harbor-migrate.ys <input-values.yaml> [output-values.yaml]
 
-warnings =: atom(vector())
+defn main(input-file output-file=nil):
+  legacy =: input-file:read:yaml/load
+  check-unsupported: legacy
+  storage-result =: legacy:map-storage
+  redis-result =: legacy:map-redis
 
-defn get-or(m keys default):
-  val =: get-in(m keys)
-  if val: val default
+  result =: !remove-nils
+    merge map-direct-fields(legacy) redis-result::
+      ingress:: map-ingress(legacy)
+      database:: map-database(legacy)
+      core:: map-core(legacy)
+      portal:: map-portal(legacy)
+      registry:: map-registry(legacy) + storage-result
+      jobservice:: map-jobservice(legacy)
+      exporter:: map-exporter(legacy)
+      trivy:: map-trivy(legacy)
+      metrics:: map-metrics(legacy)
 
-defn add-warn(level path msg action):
-  swap! warnings conj (hash-map "level" level "path" path "message" msg "action" action):
+  print-warnings:
 
-defn map-direct-fields(legacy):
-  pull-policy =: get-or(legacy ["imagePullPolicy"] "IfNotPresent")
-  =>: hash-map().assoc("externalURL" (get legacy "externalURL")).assoc("harborAdminPassword" (get legacy "harborAdminPassword")).assoc("secretKey" (get legacy "secretKey")).assoc("logLevel" (get legacy "logLevel")).assoc("image" (hash-map "pullPolicy" pull-policy))
+  if output-file:
+    then:
+      warn: "\nMigrated values written to: $output-file"
+      write output-file: result:yaml/dump
+    else:
+      say: result:yaml/dump
+
+defn map-direct-fields(legacy)::
+  externalURL:: legacy.externalURL
+  harborAdminPassword:: legacy.harborAdminPassword
+  secretKey:: legacy.secretKey
+  logLevel:: legacy.logLevel
+  image:
+    pullPolicy:: legacy.imagePullPolicy || 'IfNotPresent'
 
 defn map-ingress(legacy):
-  expose-type =: get-or(legacy ["expose" "type"] "ingress")
-  host =: get-in(legacy ["expose" "ingress" "hosts" "core"])
-  tls-enabled =: get-in(legacy ["expose" "tls" "enabled"])
-  cert-source =: get-in(legacy ["expose" "tls" "certSource"])
+  expose-type =: legacy.expose.type || 'ingress'
+  host =: legacy.expose.ingress.hosts.core
+  tls-enabled =: legacy.expose.tls.enabled
+  cert-source =: legacy.expose.tls.certSource
 
-  when (expose-type != "ingress"):
-    add-warn "ERROR" "expose.type" (str "expose.type='" expose-type "' is not supported.") "Migrate to ingress":
+  when expose-type != 'ingress':
+    add-warn 'ERROR' 'expose.type': +
+      "expose.type='$expose-type is not supported."
+      'Migrate to ingress'
 
-  when (and tls-enabled (cert-source == "auto")):
-    add-warn "WARNING" "expose.tls.certSource" "certSource='auto' is not supported." "Configure tls.certManager":
+  when tls-enabled && cert-source.eq('auto'):
+    add-warn: +
+      'WARNING'
+      'expose.tls.certSource'
+      "certSource='auto' is not supported."
+      'Configure tls.certManager'
 
-  tls-config =: (if (and tls-enabled (cert-source == "secret")) [(hash-map "secretName" (get-in legacy ["expose" "tls" "secret" "secretName"]) "hosts" [host])] [])
-
-  =>: hash-map().assoc("enabled" true).assoc("className" (get-in legacy ["expose" "ingress" "className"])).assoc("annotations" (get-in legacy ["expose" "ingress" "annotations"])).assoc("hosts" [(hash-map "host" host "paths" [(hash-map "path" "/" "pathType" "Prefix")])]).assoc("tls" tls-config)
+  =>::
+    enabled:: true
+    className:: legacy.expose.ingress.className
+    annotations:: legacy.expose.ingress.annotations
+    hosts:
+    - host:: host
+      paths:
+      - path: /
+        pathType: Prefix
+    tls::
+      if tls-enabled && cert-source.eq('secret'):
+        then::
+          secretName:: legacy.expose.tls.secret.secretName
+          hosts: [! host]
+        else:: []
 
 defn map-storage(legacy):
-  storage-type =: get-or(legacy ["persistence" "imageChartStorage" "type"] "filesystem")
+  storage-type =: legacy.persistence.imageChartStorage.type || 'filesystem'
 
   storage =:
     cond:
-      (storage-type == "filesystem"):
-        hash-map("type" "filesystem" "filesystem" (hash-map "rootdirectory" (get-or legacy ["persistence" "imageChartStorage" "filesystem" "rootdirectory"] "/storage")))
-      (storage-type == "s3"):
-        hash-map("type" "s3" "s3" (get-in legacy ["persistence" "imageChartStorage" "s3"]))
+      storage-type == "filesystem"::
+        filesystem:
+          rootdirectory:: legacy.persistence.imageChartStorage.filesystem.rootdirectory ||
+            '/storage'
+        type: filesystem
+      storage-type == "s3"::
+        type: s3
+        s3:: legacy.persistence.imageChartStorage.s3
       else:
-        hash-map("type" storage-type)
+        type:: storage-type
 
-  pvc =: get-in(legacy ["persistence" "persistentVolumeClaim" "registry"])
-  pvc-size =: get-or(pvc ["size"] "50Gi")
-  access-mode =: get(pvc "accessMode")
+  pvc =: legacy.persistence.persistentVolumeClaim.registry
+  pvc-size =: pvc.size || '50Gi'
+  access-mode =: pvc.accessMode
 
-  persistence =: hash-map("enabled" (get-or legacy ["persistence" "enabled"] true) "size" pvc-size "storageClass" (get pvc "storageClass") "existingClaim" (get pvc "existingClaim") "accessModes" (if access-mode [access-mode] nil))
+  persistence =::
+    enabled:: legacy.persistence.enabled || true
+    accessModes::
+      when access-mode:: [! access-mode]
+    storageClass:: pvc.storageClass
+    size:: pvc-size
+    existingClaim:: pvc.existingClaim
 
-  =>: hash-map("storage" storage "persistence" persistence)
+  =>:: {storage:: storage, persistence:: persistence}
 
+warnings =: atom([])
+
+defn add-warn(level path msg action):
+  swap warnings conj::
+    level:: level
+    path:: path
+    message:: msg
+    action:: action
+
+# This function will go away in the end:
+defn get-or(m keys default):
+  m.get-in(keys) || default
+
+#------------------------------------------------------------------------------
+# Unrefactored code below:
+#------------------------------------------------------------------------------
 defn map-database(legacy):
   db-type =: get-or(legacy ["database" "type"] "internal")
 
@@ -182,18 +248,3 @@ defn remove-nils(m):
     (sequential? m):
       =>: mapv(remove-nils m)
     else: m
-
-defn main(input-file output-file=""):
-  legacy =: yaml/load(slurp(input-file))
-  check-unsupported: legacy
-  storage-result =: map-storage(legacy)
-  redis-result =: map-redis(legacy)
-  result =: remove-nils(merge(map-direct-fields(legacy) hash-map("ingress" (map-ingress legacy)) hash-map("database" (map-database legacy)) redis-result hash-map("core" (map-core legacy)) hash-map("portal" (map-portal legacy)) hash-map("registry" (merge (map-registry legacy) storage-result)) hash-map("jobservice" (map-jobservice legacy)) hash-map("exporter" (map-exporter legacy)) hash-map("trivy" (map-trivy legacy)) hash-map("metrics" (map-metrics legacy))))
-  print-warnings:
-  output =: yaml/dump(result)
-  if (and output-file (not (empty? output-file))):
-    then:
-      spit output-file output:
-      warn: "\nMigrated values written to: $output-file"
-    else:
-      say: output

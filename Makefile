@@ -16,4 +16,8 @@ test: values-migrated.yaml values-new.yaml
 	@echo PASS
 
 values-new.yaml: values-original.yaml harbor-migrate.ys $(YS)
+ifndef x
 	ys harbor-migrate.ys $< > $@ 2> migrate-errors.txt
+else
+	ys -Ux harbor-migrate.ys $<
+endif
